@@ -59,9 +59,9 @@ def get_parser_params():
         cli.ParserParam('-da', '--destination-address',
                         help='Temporary S3 location for migrated parquet files.',
                         type=S3Uri,
-                        default=S3Uri('s3://bi-temp-data/temp/migration/').append(run_ts)),
+                        default=S3Uri('s3://').append(run_ts)),
         cli.ParserParam('-ba', '--backup-address', help='Backup files S3 location.',
-                        default=S3Uri('s3://bi-temp-data/temp/migration_backup/').append(run_ts),
+                        default=S3Uri('s3://').append(run_ts),
                         type=S3Uri),
         cli.ParserParam('-s', '--spec', help='Spec for column(s) migration in the form of '
                                              '"column_name1, from_type1, to_type1; column_name2, from_type2, to_type2",'
@@ -73,10 +73,13 @@ def get_parser_params():
         cli.ParserParam('-H', '--hot-run', default=False, action='store_true',
                         help='Hot run - overwrite original parquets with migrated ones'),
         cli.ParserParam('-S', '--sensitive', default=False, action='store_true',
-                        help='Affected data is sensitive'))
+                        help='Affected data is sensitive'),
+        cli.ParserParam('-E', '--exposed-migration', default=True, action='store_false',
+                        help='Run exposed migration. WARNING: This omits checks for overflows or other unsafe '
+                             'conversions. May lead to data loss!'))
 
     parser = cli.Parser(params=('--destination-address', '--backup-address',
-                                '--workers', '--backwards', '--hot-run'),
+                                '--workers', '--backwards', '--hot-run', '--exposed-migration'),
                         help='This is a parquet file column data type migrator. '
                              'It enables migration of column data types in data lake tables in '
                              'order to prevent HIVE_PARTITION_SCHEMA_MISMATCH errors.')
@@ -84,13 +87,14 @@ def get_parser_params():
     subparsers = (
         cli.SubParser('table',
                       params=('--database', '--table', '--location', '--spec', '--workers', '--backwards',
-                              '--hot-run', '--destination-address', '--backup-address', '--sensitive'),
+                              '--hot-run', '--destination-address', '--backup-address', '--sensitive',
+                              '--exposed-migration'),
                       help='Migrate columns for the specified glue table and recreate partitions',
                       func=run_glue_table_migration
                       ),
         cli.SubParser('s3loc',
-                      params=('--s3-path', '--spec', '--workers', '--backwards',
-                              '--hot-run', '--destination-address', '--backup-address', '--sensitive'),
+                      params=('--s3-path', '--spec', '--workers', '--backwards', '--hot-run',
+                              '--destination-address', '--backup-address', '--sensitive', '--exposed-migration'),
                       help='Migrate columns in parquets in the specified S3 location tree',
                       func=run_s3_loc_migration
                       ),
@@ -104,14 +108,14 @@ def run_glue_table_migration(args):
     glue_based_migration(dest_base=args.destination_address, column_migs=parse_spec_string(args.spec),
                          backup_base=args.backup_address, db=args.database, table_name=args.table, db_loc=args.location,
                          hot_run=args.hot_run, workers=args.workers, backwards=args.backwards,
-                         is_sensitive=args.sensitive)
+                         is_sensitive=args.sensitive, safe_mig=args.exposed_migration)
 
 
 def run_s3_loc_migration(args):
     s3_path_based_migration(dest_base=args.destination_address, backup_base=args.backup_address,
                             column_migs=parse_spec_string(args.spec), s3_path=args.s3_path,
                             hot_run=args.hot_run, workers=args.workers, backwards=args.backwards,
-                            is_sensitive=args.sensitive)
+                            is_sensitive=args.sensitive, safe_mig=args.exposed_migration)
 
 
 def get_parser() -> argparse.ArgumentParser:

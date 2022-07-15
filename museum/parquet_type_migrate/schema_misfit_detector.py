@@ -7,11 +7,12 @@ from boto3 import client, Session
 from pyarrow import parquet as pq
 from typing import Union
 
+from bi_etl.utils import configure_console_logging, extract_partition_location
+from bi_etl.glue_client import GlueClient
 from tools.update_catalog.parallel import run_parallel
 from tools.update_catalog.s3utils import S3Uri
-from bi_etl.utils import configure_console_logging
 
-REGION = 'eu-central-1'
+REGION = ''
 
 logger = logging.getLogger(__name__)
 configure_console_logging()
@@ -61,15 +62,41 @@ def task_factory(last_pq, test_pq, schema_mis, workers, is_sensitive: bool):
     return f
 
 
-def parquet_schema_checker(s3_loc: S3Uri, workers: int, is_sensitive: bool):
-    session = Session(region_name=REGION)
-    s3_resource = session.resource('s3')
-    buckt = s3_resource.Bucket(s3_loc.bucket)
-    objects = buckt.objects.filter(Prefix=s3_loc.key)
+def get_partition_parquets(db: str, table_name: str):
+    g = GlueClient(db, 's3://', REGION)
+    parts = list(g.get_partitions(database=db, table_name=table_name))
+    assert parts, f'No partitions obtained for {db}.{table_name}'
+    logger.info(f'Listed {len(parts)} partitions for {db}.{table_name}')
 
     # List all parquet files for selected table and sort them
-    pq_list = ['s3://' + pq.bucket_name + '/' + pq.key for pq in objects]
-    pq_list.sort(key=lambda s: s.split('/')[-1])
+    part_pqs = [S3Uri(extract_partition_location(p)) for p in parts]
+    part_pqs.sort()
+
+    return part_pqs
+
+
+def parquet_schema_checker(db: str, table: str, s3_loc: S3Uri, workers: int, is_sensitive: bool,
+                           scan_partitions: bool):
+    session = Session(region_name=REGION)
+
+    if scan_partitions:
+        part_pq = get_partition_parquets(db=db, table_name=table)
+        clt = session.client('s3')
+        pq_list = []
+        for i in part_pq:
+            list_obj = clt.list_objects_v2(Bucket=i.bucket, Prefix=i.key)
+            parq_clean = [f's3://{i.bucket}/{p["Key"]}' for p in list_obj['Contents']]
+            pq_list.extend(parq_clean)
+        pq_list.sort()
+
+    else:
+        s3_resource = session.resource('s3')
+        buckt = s3_resource.Bucket(s3_loc.bucket)
+        objects = buckt.objects.filter(Prefix=s3_loc.key)
+
+        # List all parquet files for selected table and sort them
+        pq_list = ['s3://' + pq.bucket_name + '/' + pq.key for pq in objects]
+        pq_list.sort()
 
     assert len(pq_list) > 1, 'The path {s3_loc} contains only one parquet file. Skipping checker...'.format(
         s3_loc=s3_loc)
@@ -167,6 +194,10 @@ def main_run(argmts):
                         help='Use \'elevated\' profile.',
                         default=False,
                         action='store_true')
+    parser.add_argument('-ps', '--partition-scan',
+                        help='Scan only active partitions instead of all parquet files.',
+                        default=False,
+                        action='store_true')
     parser.add_argument('-w', '--workers',
                         help='Number of workers to run in parallel',
                         type=int,
@@ -182,9 +213,12 @@ def main_run(argmts):
         table=args.table,
         s3_loc=args.s3_address,
         checker_output=parquet_schema_checker(
+            db=args.database,
+            table=args.table,
             s3_loc=args.s3_address,
             workers=args.workers,
-            is_sensitive=args.sensitive
+            is_sensitive=args.sensitive,
+            scan_partitions=args.partition_scan
         ),
         upload_to_s3=args.s3_upload
     )

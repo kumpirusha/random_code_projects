@@ -36,6 +36,7 @@ def json_fetcher(s3_address: str):
 # Extract relevant columns to migrate for each checked table
 def ctm_json_parser(json_res):
     file_loc = json_res['parquet_file_location']
+    db, tbl = json_res['database'], json_res['table']
     cols_to_migrate = []
     for i in json_res['checker_result']:
         cols_to_migrate.extend(list(list(i.values())[0].items()))
@@ -44,26 +45,27 @@ def ctm_json_parser(json_res):
 
     logger.info(f'Found {len(cols_to_migrate)} dtype discrepancies in {file_loc}.')
 
-    return [file_loc, list(set(cols_to_migrate))]
+    return file_loc, db, tbl, list(set(cols_to_migrate))
 
 
 # Parse the parameter for type_migrator.py into the template
-def script_generator(type_mig_list: list, workers: int = 4):
-    for i in type_mig_list:
-        mig_list = [s.replace(',', '').replace(')', '').replace('(', ' ').replace(')', '') if s.startswith(
-            'decimal') else s.replace('double', 'float64') for tup in type_mig_list[1] for s in tup]
-        assert len(mig_list) % 3 == 0, f'Incorrect number of parameters in migrator script: {i[1]}'
-        lot = []
-        for n in range(2, len(mig_list), 3):
-            lot.append(', '.join([i for i in mig_list[n - 2:n + 1]]))
-        type_mig_template = 'python -m tools.type_migrator \
-            s3loc -p {s3_loc} \
-                -s "{mig_spec}" \
-                    -w {workers} -H;'.format(s3_loc=type_mig_list[0],
-                                             mig_spec='; '.join([i for i in lot]),
-                                             workers=workers)
+def script_generator(type_mig_list: tuple, workers: int):
+    mig_list = [s.replace(',', '').replace(')', '').replace('(', ' ').replace(')', '') if s.startswith(
+        'decimal') else s.replace('double', 'float64') for tup in type_mig_list[-1] for s in tup]
+    assert len(mig_list) % 3 == 0, f'Incorrect number of parameters in migrator script: {i[1]}'
+    lot = []
+    for n in range(2, len(mig_list), 3):
+        lot.append(', '.join([i for i in mig_list[n - 2:n + 1]]))
+    type_mig_template = 'python -m tools.type_migrator table -L {s3_loc} -d {database} -t {table} ' \
+                        '-s "{mig_spec}" -w {workers} -H;'.format(s3_loc=type_mig_list[0],
+                                                                  database=type_mig_list[1],
+                                                                  table=type_mig_list[2],
+                                                                  mig_spec='; '.join([i for i in lot]),
+                                                                  workers=workers)
 
-        return type_mig_template
+    logger.info(f'The following script has been generated: {type_mig_template}')
+
+    return type_mig_template
 
 
 def main_run(argmts):
@@ -92,7 +94,7 @@ def main_run(argmts):
     checker_results_clean = []
 
     for i in res_json:
-        checker_results_clean.append(ctm_json_parser(i))
+        checker_results_clean.append(tuple(ctm_json_parser(i)))
 
     migrator_scripts = []
     for res in checker_results_clean:
